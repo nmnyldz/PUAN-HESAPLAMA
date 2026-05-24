@@ -1,0 +1,3408 @@
+/* ============================================
+   LGS & YKS Puan Hesaplama - Application Logic
+   ============================================ */
+
+// ============ UTILITY FUNCTIONS ============
+
+/**
+ * Calculate net score: Doğru - (Yanlış / divisor)
+ * LGS: divisor = 3, YKS: divisor = 4
+ */
+function calculateNet(dogru, yanlis, divisor) {
+    return dogru - (yanlis / divisor);
+}
+
+/**
+ * Get numeric value from input element
+ */
+function getVal(id) {
+    const el = document.getElementById(id);
+    return el ? (parseFloat(el.value) || 0) : 0;
+}
+
+/**
+ * Validate input doesn't exceed max or go below 0
+ * Also ensure doğru + yanlış doesn't exceed total questions
+ */
+function validateInput(input, maxQuestions) {
+    let val = parseInt(input.value) || 0;
+    if (val < 0) val = 0;
+    if (val > maxQuestions) val = maxQuestions;
+    input.value = val;
+
+    // Check doğru + yanlış <= maxQuestions
+    const id = input.id;
+    const parts = id.split('-');
+    const type = parts[parts.length - 1]; // 'dogru' or 'yanlis'
+    const baseId = id.replace(/-dogru$|-yanlis$/, '');
+
+    const dogruEl = document.getElementById(baseId + '-dogru');
+    const yanlisEl = document.getElementById(baseId + '-yanlis');
+
+    if (dogruEl && yanlisEl) {
+        const dogru = parseInt(dogruEl.value) || 0;
+        const yanlis = parseInt(yanlisEl.value) || 0;
+        if (dogru + yanlis > maxQuestions) {
+            if (type === 'dogru') {
+                dogruEl.value = maxQuestions - yanlis;
+            } else {
+                yanlisEl.value = maxQuestions - dogru;
+            }
+        }
+    }
+}
+
+/**
+ * Validate and calculate for LGS
+ */
+function validateAndCalculateLGS(input, maxQuestions) {
+    validateInput(input, maxQuestions);
+    updateLGSNets();
+}
+
+/**
+ * Validate and calculate for YKS
+ */
+function validateAndCalculateYKS(input, maxQuestions) {
+    validateInput(input, maxQuestions);
+    updateTYTNets();
+}
+
+/**
+ * Adjust value with +/- buttons
+ */
+function adjustValue(inputId, delta, maxQuestions) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    let val = (parseInt(input.value) || 0) + delta;
+    if (val < 0) val = 0;
+    if (val > maxQuestions) val = maxQuestions;
+    input.value = val;
+
+    // Re-validate total
+    validateInput(input, maxQuestions);
+
+    // Update nets based on which exam
+    if (inputId.startsWith('lgs-')) {
+        updateLGSNets();
+    } else if (inputId.startsWith('tyt-')) {
+        updateTYTNets();
+    }
+    // AYT nets update on calculate
+}
+
+/**
+ * Animate a number counting up
+ */
+function animateValue(element, start, end, duration) {
+    const startTime = performance.now();
+    const diff = end - start;
+
+    function update(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        // Ease out cubic
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = start + diff * eased;
+        element.textContent = current.toFixed(2);
+        if (progress < 1) {
+            requestAnimationFrame(update);
+        }
+    }
+
+    requestAnimationFrame(update);
+}
+
+/**
+ * Create a breakdown bar HTML
+ */
+function createBreakdownBar(name, net, maxNet, color) {
+    const percentage = maxNet > 0 ? Math.max(0, (net / maxNet) * 100) : 0;
+    return `
+        <div class="breakdown-item">
+            <span class="subject-name">${name}</span>
+            <div class="bar-track">
+                <div class="bar-fill" style="width: ${percentage}%; background: ${color};"></div>
+            </div>
+            <span class="bar-value">${net.toFixed(2)}</span>
+        </div>
+    `;
+}
+
+
+// ============ HISTORICAL DATA & RANKING ============
+
+/**
+ * Son 5 Yıl LGS Verileri (Yaklaşık)
+ * Kaynak: MEB açıklamaları ve istatistikler
+ */
+const LGS_YEARLY_DATA = {
+    2021: { totalStudents: 1097000 },
+    2022: { totalStudents: 1157000 },
+    2023: { totalStudents: 1207000 },
+    2024: { totalStudents: 1254000 },
+    2025: { totalStudents: 1308000 }
+};
+
+/**
+ * Son 5 Yıl YKS TYT Verileri (Yaklaşık)
+ * Kaynak: ÖSYM istatistikleri
+ */
+const TYT_YEARLY_DATA = {
+    2021: { totalStudents: 2442000 },
+    2022: { totalStudents: 2534000 },
+    2023: { totalStudents: 2617000 },
+    2024: { totalStudents: 2795000 },
+    2025: { totalStudents: 2891000 }
+};
+
+/**
+ * Son 5 Yıl AYT Puan Türüne Göre Aday Sayıları (Yaklaşık)
+ */
+const AYT_YEARLY_DATA = {
+    say: {
+        2021: { totalStudents: 780000 },
+        2022: { totalStudents: 810000 },
+        2023: { totalStudents: 835000 },
+        2024: { totalStudents: 870000 },
+        2025: { totalStudents: 905000 }
+    },
+    ea: {
+        2021: { totalStudents: 590000 },
+        2022: { totalStudents: 615000 },
+        2023: { totalStudents: 640000 },
+        2024: { totalStudents: 670000 },
+        2025: { totalStudents: 698000 }
+    },
+    soz: {
+        2021: { totalStudents: 480000 },
+        2022: { totalStudents: 505000 },
+        2023: { totalStudents: 525000 },
+        2024: { totalStudents: 550000 },
+        2025: { totalStudents: 572000 }
+    },
+    dil: {
+        2021: { totalStudents: 185000 },
+        2022: { totalStudents: 195000 },
+        2023: { totalStudents: 205000 },
+        2024: { totalStudents: 215000 },
+        2025: { totalStudents: 225000 }
+    }
+};
+
+/**
+ * Puan → Yüzdelik dilim (üstten) eşleme tabloları
+ * Piecewise linear interpolation ile ara değerler hesaplanır
+ * [puan, yüzdeFromTop] formatında - yüzdeFromTop = üstten yüzde kaçlık dilimdesin
+ */
+const LGS_SCORE_CURVE = [
+    [500, 0.001], [495, 0.01], [490, 0.05], [485, 0.1],
+    [480, 0.2],  [475, 0.35], [470, 0.5],  [465, 0.7],
+    [460, 1.0],  [455, 1.3],  [450, 1.7],  [445, 2.2],
+    [440, 2.8],  [435, 3.5],  [430, 4.3],  [425, 5.2],
+    [420, 6.3],  [415, 7.5],  [410, 8.8],  [405, 10.2],
+    [400, 12.0], [395, 13.8], [390, 15.8], [385, 18.0],
+    [380, 20.5], [375, 23.0], [370, 25.8], [365, 28.8],
+    [360, 32.0], [355, 35.0], [350, 38.5], [345, 42.0],
+    [340, 45.5], [335, 49.0], [330, 52.5], [325, 56.0],
+    [320, 59.5], [315, 63.0], [310, 66.0], [305, 69.0],
+    [300, 72.0], [290, 77.0], [280, 81.5], [270, 85.5],
+    [260, 89.0], [250, 92.0], [240, 94.5], [230, 96.5],
+    [220, 98.0], [210, 99.2], [200, 100.0]
+];
+
+const TYT_SCORE_CURVE = [
+    [500, 0.001], [490, 0.01], [480, 0.04], [470, 0.1],
+    [460, 0.2],  [450, 0.4],  [440, 0.7],  [430, 1.1],
+    [420, 1.7],  [410, 2.5],  [400, 3.5],  [390, 4.8],
+    [380, 6.5],  [370, 8.5],  [360, 11.0], [350, 13.5],
+    [340, 16.5], [330, 20.0], [320, 24.0], [310, 28.0],
+    [300, 32.5], [290, 37.0], [280, 42.0], [270, 47.0],
+    [260, 52.0], [250, 57.0], [240, 62.0], [230, 67.0],
+    [220, 72.0], [210, 76.5], [200, 80.5], [190, 84.5],
+    [180, 88.0], [170, 91.0], [160, 93.5], [150, 95.5],
+    [140, 97.0], [130, 98.2], [120, 99.0], [110, 99.6],
+    [100, 100.0]
+];
+
+const AYT_SCORE_CURVES = {
+    say: [
+        [500, 0.001], [490, 0.02], [480, 0.06], [470, 0.15],
+        [460, 0.3],  [450, 0.6],  [440, 1.0],  [430, 1.6],
+        [420, 2.5],  [410, 3.6],  [400, 5.0],  [390, 6.8],
+        [380, 9.0],  [370, 11.5], [360, 14.5], [350, 17.5],
+        [340, 21.0], [330, 25.0], [320, 29.5], [310, 34.0],
+        [300, 39.0], [290, 44.0], [280, 49.0], [270, 54.0],
+        [260, 59.0], [250, 64.0], [240, 69.0], [230, 74.0],
+        [220, 78.5], [210, 83.0], [200, 87.0], [180, 92.0],
+        [160, 95.5], [140, 98.0], [120, 99.3], [100, 100.0]
+    ],
+    ea: [
+        [500, 0.001], [490, 0.02], [480, 0.05], [470, 0.12],
+        [460, 0.25], [450, 0.5],  [440, 0.9],  [430, 1.5],
+        [420, 2.3],  [410, 3.4],  [400, 4.8],  [390, 6.5],
+        [380, 8.8],  [370, 11.5], [360, 14.5], [350, 18.0],
+        [340, 22.0], [330, 26.5], [320, 31.0], [310, 36.0],
+        [300, 41.0], [290, 46.5], [280, 52.0], [270, 57.0],
+        [260, 62.5], [250, 68.0], [240, 73.0], [230, 78.0],
+        [220, 82.5], [210, 87.0], [200, 90.5], [180, 94.5],
+        [160, 97.0], [140, 98.8], [120, 99.5], [100, 100.0]
+    ],
+    soz: [
+        [500, 0.001], [490, 0.02], [480, 0.06], [470, 0.14],
+        [460, 0.28], [450, 0.55], [440, 1.0],  [430, 1.6],
+        [420, 2.5],  [410, 3.8],  [400, 5.5],  [390, 7.5],
+        [380, 10.0], [370, 13.0], [360, 16.5], [350, 20.0],
+        [340, 24.5], [330, 29.0], [320, 34.0], [310, 39.0],
+        [300, 44.0], [290, 49.5], [280, 55.0], [270, 60.0],
+        [260, 65.0], [250, 70.0], [240, 75.0], [230, 80.0],
+        [220, 84.5], [210, 88.5], [200, 92.0], [180, 95.5],
+        [160, 97.5], [140, 99.0], [120, 99.6], [100, 100.0]
+    ],
+    dil: [
+        [500, 0.001], [490, 0.03], [480, 0.08], [470, 0.2],
+        [460, 0.4],  [450, 0.8],  [440, 1.3],  [430, 2.0],
+        [420, 3.0],  [410, 4.5],  [400, 6.5],  [390, 9.0],
+        [380, 12.0], [370, 15.5], [360, 19.5], [350, 24.0],
+        [340, 29.0], [330, 34.0], [320, 39.5], [310, 45.0],
+        [300, 50.5], [290, 56.0], [280, 61.5], [270, 67.0],
+        [260, 72.0], [250, 77.0], [240, 81.5], [230, 85.5],
+        [220, 89.0], [210, 92.0], [200, 94.5], [180, 97.0],
+        [160, 98.5], [140, 99.3], [120, 99.7], [100, 100.0]
+    ]
+};
+
+/**
+ * Piecewise linear interpolation
+ * curve: [[score, percentFromTop], ...] - score desc order
+ */
+function interpolatePercentile(score, curve) {
+    // Score above max
+    if (score >= curve[0][0]) return curve[0][1];
+    // Score below min
+    if (score <= curve[curve.length - 1][0]) return curve[curve.length - 1][1];
+
+    for (let i = 0; i < curve.length - 1; i++) {
+        const [s1, p1] = curve[i];
+        const [s2, p2] = curve[i + 1];
+        if (score <= s1 && score >= s2) {
+            // Linear interpolation
+            const t = (s1 - score) / (s1 - s2);
+            return p1 + t * (p2 - p1);
+        }
+    }
+    return 100;
+}
+
+/**
+ * Format number with Turkish thousands separator (dot)
+ */
+function formatNumber(num) {
+    return Math.round(num).toLocaleString('tr-TR');
+}
+
+/**
+ * Get performance badge info based on percentile from top
+ */
+function getBadgeInfo(percentFromTop) {
+    if (percentFromTop <= 1) return { text: '🥇 İlk %1 — Mükemmel!', cls: 'badge-excellent' };
+    if (percentFromTop <= 5) return { text: '🌟 İlk %5 — Çok Başarılı', cls: 'badge-excellent' };
+    if (percentFromTop <= 10) return { text: '✨ İlk %10 — Başarılı', cls: 'badge-great' };
+    if (percentFromTop <= 25) return { text: '💪 İlk %25 — İyi', cls: 'badge-good' };
+    if (percentFromTop <= 50) return { text: '📈 Üst Yarı — Ortalamanın Üstü', cls: 'badge-average' };
+    if (percentFromTop <= 75) return { text: '📊 Orta Seviye', cls: 'badge-average' };
+    return { text: '📚 Geliştirilmeli', cls: 'badge-below' };
+}
+
+/**
+ * Get CSS class for percentile cell coloring
+ */
+function getPercentileColorClass(percentFromTop) {
+    if (percentFromTop <= 10) return 'percentile-high';
+    if (percentFromTop <= 35) return 'percentile-mid';
+    if (percentFromTop <= 65) return 'percentile-low';
+    return 'percentile-vlow';
+}
+
+/**
+ * Update circular SVG gauge
+ */
+function updateGauge(gaugeId, percentFromTop) {
+    const circumference = 2 * Math.PI * 52; // r=52
+    const percentile = 100 - percentFromTop; // convert to "how good" percentage
+    const dashLength = (percentile / 100) * circumference;
+
+    const el = document.getElementById(gaugeId);
+    if (el) {
+        // Set initial state then animate
+        el.style.transition = 'none';
+        el.setAttribute('stroke-dasharray', `0 ${circumference}`);
+        // Force reflow
+        void el.offsetWidth;
+        el.style.transition = 'stroke-dasharray 1.2s cubic-bezier(0.4, 0, 0.2, 1)';
+        el.setAttribute('stroke-dasharray', `${dashLength} ${circumference}`);
+
+        // Dynamic color based on percentile
+        if (percentFromTop <= 5) {
+            el.style.stroke = '#10b981';
+        } else if (percentFromTop <= 15) {
+            el.style.stroke = '#3b82f6';
+        } else if (percentFromTop <= 35) {
+            el.style.stroke = '#6366f1';
+        } else if (percentFromTop <= 60) {
+            el.style.stroke = '#f59e0b';
+        } else {
+            el.style.stroke = '#f43f5e';
+        }
+    }
+}
+
+/**
+ * Build yearly comparison table rows
+ */
+function buildYearlyTable(tbodyId, puan, yearlyData, scoreCurve) {
+    const tbody = document.getElementById(tbodyId);
+    if (!tbody) return;
+
+    const years = Object.keys(yearlyData).sort((a, b) => b - a);
+    let html = '';
+
+    years.forEach((year, idx) => {
+        const data = yearlyData[year];
+        const percentFromTop = interpolatePercentile(puan, scoreCurve);
+        const ranking = Math.max(1, Math.round((percentFromTop / 100) * data.totalStudents));
+        const percentile = (100 - percentFromTop).toFixed(1);
+        const colorCls = getPercentileColorClass(percentFromTop);
+        const isLatest = idx === 0;
+
+        html += `
+            <tr class="${isLatest ? 'highlight-row' : ''}">
+                <td class="year-cell">${year}</td>
+                <td>${formatNumber(data.totalStudents)}</td>
+                <td>~${formatNumber(ranking)}</td>
+                <td class="percentile-cell ${colorCls}">%${percentile}</td>
+            </tr>
+        `;
+    });
+
+    tbody.innerHTML = html;
+}
+
+/**
+ * Main function to display ranking for any exam type
+ */
+function displayRanking(prefix, puan, yearlyData, scoreCurve) {
+    const percentFromTop = interpolatePercentile(puan, scoreCurve);
+    const percentile = (100 - percentFromTop).toFixed(1);
+
+    // Average student count across years
+    const years = Object.values(yearlyData);
+    const avgStudents = Math.round(years.reduce((sum, y) => sum + y.totalStudents, 0) / years.length);
+
+    // Latest year ranking
+    const latestYear = Math.max(...Object.keys(yearlyData).map(Number));
+    const latestData = yearlyData[latestYear];
+    const ranking = Math.max(1, Math.round((percentFromTop / 100) * latestData.totalStudents));
+
+    // Update gauge
+    updateGauge(prefix + '-gauge-fill', percentFromTop);
+
+    // Update percentile text
+    const percentileEl = document.getElementById(prefix + '-percentile');
+    if (percentileEl) percentileEl.textContent = `%${percentile}`;
+
+    // Update ranking number
+    const siralamaEl = document.getElementById(prefix + '-siralama');
+    if (siralamaEl) siralamaEl.textContent = `~${formatNumber(ranking)}`;
+
+    // Update badge
+    const badgeEl = document.getElementById(prefix + '-badge');
+    if (badgeEl) {
+        const badge = getBadgeInfo(percentFromTop);
+        badgeEl.textContent = badge.text;
+        badgeEl.className = 'ranking-badge ' + badge.cls;
+    }
+
+    // Update average students
+    const avgEl = document.getElementById(prefix + '-avg-students');
+    if (avgEl) avgEl.textContent = `~${formatNumber(avgStudents)}`;
+
+    // Build yearly table
+    buildYearlyTable(prefix + '-yearly-tbody', puan, yearlyData, scoreCurve);
+}
+
+
+// ============ TAB SWITCHING ============
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        // Update tabs
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Update sections
+        const tabName = btn.dataset.tab;
+        document.querySelectorAll('.exam-section').forEach(s => s.classList.remove('active'));
+        document.getElementById('section-' + tabName).classList.add('active');
+    });
+});
+
+document.querySelectorAll('.sub-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.sub-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        const subtab = btn.dataset.subtab;
+        document.querySelectorAll('.sub-section').forEach(s => s.classList.remove('active'));
+        document.getElementById('subsection-' + subtab).classList.add('active');
+    });
+});
+
+
+// ============ AYT TYPE SWITCHING ============
+
+function switchAYTType(type) {
+    document.querySelectorAll('.ayt-type-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('ayt-type-' + type).classList.add('active');
+
+    document.querySelectorAll('.ayt-fields').forEach(f => f.classList.remove('active'));
+    document.getElementById('ayt-fields-' + type).classList.add('active');
+
+    // Hide result when switching type
+    document.getElementById('ayt-result').classList.add('hidden');
+}
+
+
+// ============ LGS CALCULATIONS ============
+
+const LGS_SUBJECTS = [
+    { key: 'turkce', name: 'Türkçe', maxQ: 20, color: '#6366f1' },
+    { key: 'matematik', name: 'Matematik', maxQ: 20, color: '#f43f5e' },
+    { key: 'fen', name: 'Fen Bilimleri', maxQ: 20, color: '#10b981' },
+    { key: 'inkilap', name: 'İnkılap Tarihi', maxQ: 10, color: '#f59e0b' },
+    { key: 'din', name: 'Din Kültürü', maxQ: 10, color: '#8b5cf6' },
+    { key: 'dil', name: 'Yabancı Dil', maxQ: 10, color: '#06b6d4' }
+];
+
+function updateLGSNets() {
+    LGS_SUBJECTS.forEach(sub => {
+        const dogru = getVal('lgs-' + sub.key + '-dogru');
+        const yanlis = getVal('lgs-' + sub.key + '-yanlis');
+        const net = calculateNet(dogru, yanlis, 3);
+        document.getElementById('lgs-' + sub.key + '-net').textContent = net.toFixed(2);
+    });
+}
+
+function calculateLGS() {
+    let totalNet = 0;
+    let totalDogru = 0;
+    let totalYanlis = 0;
+    const netDetails = [];
+
+    LGS_SUBJECTS.forEach(sub => {
+        const dogru = getVal('lgs-' + sub.key + '-dogru');
+        const yanlis = getVal('lgs-' + sub.key + '-yanlis');
+        const net = calculateNet(dogru, yanlis, 3);
+
+        totalNet += net;
+        totalDogru += dogru;
+        totalYanlis += yanlis;
+        netDetails.push({ ...sub, net, dogru, yanlis });
+    });
+
+    const totalBos = 90 - totalDogru - totalYanlis;
+
+    // LGS Puan Hesaplama (Yaklaşık)
+    // Puan = 200 + (Toplam Net / 90) × 300
+    let puan = 200 + (totalNet / 90) * 300;
+    puan = Math.max(200, Math.min(500, puan));
+
+    // Show result
+    const resultPanel = document.getElementById('lgs-result');
+    resultPanel.classList.remove('hidden');
+
+    // Animate score
+    const puanEl = document.getElementById('lgs-puan');
+    puanEl.classList.remove('score-animate');
+    void puanEl.offsetWidth; // trigger reflow
+    puanEl.classList.add('score-animate');
+    animateValue(puanEl, 0, puan, 800);
+
+    // Update stats
+    document.getElementById('lgs-toplam-net').textContent = totalNet.toFixed(2);
+    document.getElementById('lgs-toplam-dogru').textContent = totalDogru;
+    document.getElementById('lgs-toplam-yanlis').textContent = totalYanlis;
+    document.getElementById('lgs-toplam-bos').textContent = totalBos;
+
+    // Build breakdown bars
+    const barsContainer = document.getElementById('lgs-breakdown-bars');
+    barsContainer.innerHTML = netDetails.map(d =>
+        createBreakdownBar(d.name, d.net, d.maxQ, d.color)
+    ).join('');
+
+    // Display ranking & percentile
+    displayRanking('lgs', puan, LGS_YEARLY_DATA, LGS_SCORE_CURVE);
+
+    // Smooth scroll to result
+    setTimeout(() => {
+        resultPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+}
+
+function resetLGS() {
+    LGS_SUBJECTS.forEach(sub => {
+        document.getElementById('lgs-' + sub.key + '-dogru').value = 0;
+        document.getElementById('lgs-' + sub.key + '-yanlis').value = 0;
+        document.getElementById('lgs-' + sub.key + '-net').textContent = '0.00';
+    });
+    document.getElementById('lgs-result').classList.add('hidden');
+}
+
+
+// ============ TYT CALCULATIONS ============
+
+const TYT_SUBJECTS = [
+    { key: 'turkce', name: 'Türkçe', maxQ: 40, color: '#6366f1' },
+    { key: 'sosyal', name: 'Sosyal Bilimler', maxQ: 20, color: '#f59e0b' },
+    { key: 'matematik', name: 'Temel Matematik', maxQ: 40, color: '#f43f5e' },
+    { key: 'fen', name: 'Fen Bilimleri', maxQ: 20, color: '#10b981' }
+];
+
+function updateTYTNets() {
+    TYT_SUBJECTS.forEach(sub => {
+        const dogru = getVal('tyt-' + sub.key + '-dogru');
+        const yanlis = getVal('tyt-' + sub.key + '-yanlis');
+        const net = calculateNet(dogru, yanlis, 4);
+        document.getElementById('tyt-' + sub.key + '-net').textContent = net.toFixed(2);
+    });
+}
+
+function calculateTYT() {
+    let totalNet = 0;
+    let totalDogru = 0;
+    let totalYanlis = 0;
+    const netDetails = [];
+
+    TYT_SUBJECTS.forEach(sub => {
+        const dogru = getVal('tyt-' + sub.key + '-dogru');
+        const yanlis = getVal('tyt-' + sub.key + '-yanlis');
+        const net = calculateNet(dogru, yanlis, 4);
+
+        totalNet += net;
+        totalDogru += dogru;
+        totalYanlis += yanlis;
+        netDetails.push({ ...sub, net, dogru, yanlis });
+    });
+
+    const totalBos = 120 - totalDogru - totalYanlis;
+
+    // TYT Puan = 100 + (Toplam Net × 3.334)
+    let puan = 100 + (totalNet * 3.334);
+    puan = Math.max(100, Math.min(500, puan));
+
+    // Show result
+    const resultPanel = document.getElementById('tyt-result');
+    resultPanel.classList.remove('hidden');
+
+    const puanEl = document.getElementById('tyt-puan');
+    puanEl.classList.remove('score-animate');
+    void puanEl.offsetWidth;
+    puanEl.classList.add('score-animate');
+    animateValue(puanEl, 0, puan, 800);
+
+    document.getElementById('tyt-toplam-net').textContent = totalNet.toFixed(2);
+    document.getElementById('tyt-toplam-dogru').textContent = totalDogru;
+    document.getElementById('tyt-toplam-yanlis').textContent = totalYanlis;
+    document.getElementById('tyt-toplam-bos').textContent = totalBos;
+
+    // Breakdown bars
+    const barsContainer = document.getElementById('tyt-breakdown-bars');
+    barsContainer.innerHTML = netDetails.map(d =>
+        createBreakdownBar(d.name, d.net, d.maxQ, d.color)
+    ).join('');
+
+    // Display ranking & percentile
+    displayRanking('tyt', puan, TYT_YEARLY_DATA, TYT_SCORE_CURVE);
+
+    setTimeout(() => {
+        resultPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+}
+
+function resetTYT() {
+    TYT_SUBJECTS.forEach(sub => {
+        document.getElementById('tyt-' + sub.key + '-dogru').value = 0;
+        document.getElementById('tyt-' + sub.key + '-yanlis').value = 0;
+        document.getElementById('tyt-' + sub.key + '-net').textContent = '0.00';
+    });
+    document.getElementById('tyt-result').classList.add('hidden');
+}
+
+
+// ============ AYT CALCULATIONS ============
+
+/*
+ * AYT Puan Hesaplama (Yaklaşık Katsayılar)
+ *
+ * SAY Puanı = TYT Puanı × 0.40 + (Mat Net × 3.0 + Fiz Net × 2.85 + Kim Net × 3.07 + Bio Net × 3.07) + 100
+ * EA Puanı  = TYT Puanı × 0.40 + (Mat Net × 3.0 + Edb Net × 3.33 + Tar1 Net × 2.80 + Coğ1 Net × 3.33) + 100
+ * SÖZ Puanı = TYT Puanı × 0.40 + (Edb Net × 3.33 + Tar1 Net × 2.80 + Coğ1 Net × 3.33 + Tar2 × 2.91 + Coğ2 × 2.91 + Fel × 3.0 + Din × 3.33) + 100
+ * DİL Puanı = TYT Puanı × 0.40 + (YDil Net × 3.125) + 100
+ */
+
+const AYT_CONFIG = {
+    say: {
+        label: 'SAY',
+        fields: [
+            { id: 'ayt-say-mat', name: 'Matematik', maxQ: 40, coef: 3.0, color: '#f43f5e' },
+            { id: 'ayt-say-fiz', name: 'Fizik', maxQ: 14, coef: 2.85, color: '#8b5cf6' },
+            { id: 'ayt-say-kim', name: 'Kimya', maxQ: 13, coef: 3.07, color: '#10b981' },
+            { id: 'ayt-say-bio', name: 'Biyoloji', maxQ: 13, coef: 3.07, color: '#06b6d4' }
+        ]
+    },
+    ea: {
+        label: 'EA',
+        fields: [
+            { id: 'ayt-ea-mat', name: 'Matematik', maxQ: 40, coef: 3.0, color: '#f43f5e' },
+            { id: 'ayt-ea-edb', name: 'Edebiyat', maxQ: 24, coef: 3.33, color: '#6366f1' },
+            { id: 'ayt-ea-tar1', name: 'Tarih-1', maxQ: 10, coef: 2.80, color: '#f59e0b' },
+            { id: 'ayt-ea-cog1', name: 'Coğrafya-1', maxQ: 6, coef: 3.33, color: '#10b981' }
+        ]
+    },
+    soz: {
+        label: 'SÖZ',
+        fields: [
+            { id: 'ayt-soz-edb', name: 'Edebiyat', maxQ: 24, coef: 3.33, color: '#6366f1' },
+            { id: 'ayt-soz-tar1', name: 'Tarih-1', maxQ: 10, coef: 2.80, color: '#f59e0b' },
+            { id: 'ayt-soz-cog1', name: 'Coğrafya-1', maxQ: 6, coef: 3.33, color: '#10b981' },
+            { id: 'ayt-soz-tar2', name: 'Tarih-2', maxQ: 11, coef: 2.91, color: '#8b5cf6' },
+            { id: 'ayt-soz-cog2', name: 'Coğrafya-2', maxQ: 11, coef: 2.91, color: '#06b6d4' },
+            { id: 'ayt-soz-fel', name: 'Felsefe', maxQ: 12, coef: 3.0, color: '#f43f5e' },
+            { id: 'ayt-soz-din', name: 'Din Kültürü', maxQ: 6, coef: 3.33, color: '#ec4899' }
+        ]
+    },
+    dil: {
+        label: 'DİL',
+        fields: [
+            { id: 'ayt-dil', name: 'Yabancı Dil', maxQ: 80, coef: 3.125, color: '#06b6d4' }
+        ]
+    }
+};
+
+function getActivePuanType() {
+    const activeBtn = document.querySelector('.ayt-type-btn.active');
+    return activeBtn ? activeBtn.dataset.type : 'say';
+}
+
+function getTYTPuan() {
+    // Get TYT nets to calculate TYT contribution
+    let tytNet = 0;
+    TYT_SUBJECTS.forEach(sub => {
+        const dogru = getVal('tyt-' + sub.key + '-dogru');
+        const yanlis = getVal('tyt-' + sub.key + '-yanlis');
+        tytNet += calculateNet(dogru, yanlis, 4);
+    });
+    let tytPuan = 100 + (tytNet * 3.334);
+    return Math.max(100, Math.min(500, tytPuan));
+}
+
+function calculateAYT() {
+    const type = getActivePuanType();
+    const config = AYT_CONFIG[type];
+
+    let aytWeightedScore = 0;
+    let totalDogru = 0;
+    let totalYanlis = 0;
+    let totalNet = 0;
+    const netDetails = [];
+
+    config.fields.forEach(field => {
+        const dogru = getVal(field.id + '-dogru');
+        const yanlis = getVal(field.id + '-yanlis');
+        const net = calculateNet(dogru, yanlis, 4);
+
+        // Update net display
+        const netEl = document.getElementById(field.id + '-net');
+        if (netEl) netEl.textContent = net.toFixed(2);
+
+        aytWeightedScore += net * field.coef;
+        totalDogru += dogru;
+        totalYanlis += yanlis;
+        totalNet += net;
+        netDetails.push({ ...field, net });
+    });
+
+    // Get TYT contribution
+    const tytPuan = getTYTPuan();
+    const tytContribution = tytPuan * 0.40;
+
+    // Final score
+    let puan = tytContribution + aytWeightedScore + 100;
+    puan = Math.max(100, Math.min(500, puan));
+
+    // Show result
+    const resultPanel = document.getElementById('ayt-result');
+    resultPanel.classList.remove('hidden');
+
+    // Update label
+    document.getElementById('ayt-puan-label').textContent = `Tahmini ${config.label} Puanı`;
+
+    const puanEl = document.getElementById('ayt-puan');
+    puanEl.classList.remove('score-animate');
+    void puanEl.offsetWidth;
+    puanEl.classList.add('score-animate');
+    animateValue(puanEl, 0, puan, 800);
+
+    document.getElementById('ayt-toplam-net').textContent = totalNet.toFixed(2);
+    document.getElementById('ayt-toplam-dogru').textContent = totalDogru;
+    document.getElementById('ayt-toplam-yanlis').textContent = totalYanlis;
+
+    // Breakdown
+    const barsContainer = document.getElementById('ayt-breakdown-bars');
+    barsContainer.innerHTML = netDetails.map(d =>
+        createBreakdownBar(d.name, d.net, d.maxQ, d.color)
+    ).join('');
+
+    // Display ranking & percentile for AYT
+    const aytYearlyData = AYT_YEARLY_DATA[type];
+    const aytScoreCurve = AYT_SCORE_CURVES[type];
+    displayRanking('ayt', puan, aytYearlyData, aytScoreCurve);
+
+    setTimeout(() => {
+        resultPanel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+}
+
+function resetAYT() {
+    const type = getActivePuanType();
+    const config = AYT_CONFIG[type];
+
+    config.fields.forEach(field => {
+        const dogruEl = document.getElementById(field.id + '-dogru');
+        const yanlisEl = document.getElementById(field.id + '-yanlis');
+        const netEl = document.getElementById(field.id + '-net');
+        if (dogruEl) dogruEl.value = 0;
+        if (yanlisEl) yanlisEl.value = 0;
+        if (netEl) netEl.textContent = '0.00';
+    });
+
+    document.getElementById('ayt-result').classList.add('hidden');
+}
+
+
+// ============ KEYBOARD SUPPORT ============
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        // Determine which section is active and calculate
+        const lgsSection = document.getElementById('section-lgs');
+        if (lgsSection.classList.contains('active')) {
+            calculateLGS();
+        } else {
+            const tytSub = document.getElementById('subsection-tyt');
+            if (tytSub.classList.contains('active')) {
+                calculateTYT();
+            } else {
+                calculateAYT();
+            }
+        }
+    }
+});
+
+
+// ============ INITIAL STATE ============
+
+// Initialize nets
+updateLGSNets();
+updateTYTNets();
+
+// Add stagger animation to cards on load
+document.querySelectorAll('.subject-card').forEach((card, index) => {
+    card.style.opacity = '0';
+    card.style.transform = 'translateY(20px)';
+    setTimeout(() => {
+        card.style.transition = 'opacity 0.5s ease-out, transform 0.5s ease-out';
+        card.style.opacity = '1';
+        card.style.transform = 'translateY(0)';
+    }, 100 + index * 80);
+});
+
+/* ============================================
+   LGS & YKS Puan Hesaplama - Stylesheet
+   Premium Dark Theme with Glassmorphism
+   ============================================ */
+
+/* ---- CSS Variables ---- */
+:root {
+    --bg-primary: #0a0a1a;
+    --bg-secondary: #111128;
+    --bg-card: rgba(20, 20, 50, 0.6);
+    --bg-card-hover: rgba(30, 30, 70, 0.7);
+    --border-glass: rgba(255, 255, 255, 0.08);
+    --border-active: rgba(255, 255, 255, 0.15);
+    --text-primary: #f0f0ff;
+    --text-secondary: #a0a0c0;
+    --text-muted: #606080;
+    --gradient-1: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+    --gradient-2: linear-gradient(135deg, #06b6d4, #3b82f6, #8b5cf6);
+    --gradient-3: linear-gradient(135deg, #10b981, #06b6d4);
+    --shadow-glow: 0 0 60px rgba(99, 102, 241, 0.15);
+    --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
+    --radius-sm: 8px;
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --radius-xl: 28px;
+    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ---- Reset ---- */
+*, *::before, *::after {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+    line-height: 1.6;
+}
+
+/* ---- Animated Background ---- */
+.bg-animation {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.bg-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.4;
+    animation: orbFloat 20s ease-in-out infinite;
+}
+
+.bg-orb-1 {
+    width: 500px;
+    height: 500px;
+    background: radial-gradient(circle, #6366f1 0%, transparent 70%);
+    top: -10%;
+    left: -5%;
+    animation-delay: 0s;
+}
+
+.bg-orb-2 {
+    width: 400px;
+    height: 400px;
+    background: radial-gradient(circle, #ec4899 0%, transparent 70%);
+    top: 40%;
+    right: -10%;
+    animation-delay: -5s;
+    animation-duration: 25s;
+}
+
+.bg-orb-3 {
+    width: 350px;
+    height: 350px;
+    background: radial-gradient(circle, #06b6d4 0%, transparent 70%);
+    bottom: -5%;
+    left: 30%;
+    animation-delay: -10s;
+    animation-duration: 22s;
+}
+
+.bg-orb-4 {
+    width: 300px;
+    height: 300px;
+    background: radial-gradient(circle, #a855f7 0%, transparent 70%);
+    top: 20%;
+    left: 50%;
+    animation-delay: -15s;
+    animation-duration: 28s;
+}
+
+@keyframes orbFloat {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    25% { transform: translate(40px, -30px) scale(1.1); }
+    50% { transform: translate(-20px, 40px) scale(0.9); }
+    75% { transform: translate(30px, 20px) scale(1.05); }
+}
+
+/* ---- App Container ---- */
+.app-container {
+    position: relative;
+    z-index: 1;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 20px 60px;
+}
+
+/* ---- Header ---- */
+.app-header {
+    text-align: center;
+    padding: 48px 20px 40px;
+    animation: fadeInDown 0.8s ease-out;
+}
+
+.header-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 100px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: #a5b4fc;
+    margin-bottom: 20px;
+}
+
+.badge-icon {
+    font-size: 1rem;
+}
+
+.header-title {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
+.title-gradient {
+    font-size: 3.2rem;
+    font-weight: 900;
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -1px;
+    line-height: 1.1;
+}
+
+.title-sub {
+    font-size: 1.5rem;
+    font-weight: 300;
+    color: var(--text-secondary);
+    letter-spacing: 2px;
+}
+
+.header-desc {
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+/* ---- Main Tabs ---- */
+.main-tabs {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 32px;
+    padding: 6px;
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-lg);
+    animation: fadeInUp 0.6s ease-out 0.2s both;
+}
+
+.tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 16px 20px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: var(--transition);
+    color: var(--text-secondary);
+}
+
+.tab-btn:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-primary);
+}
+
+.tab-btn.active {
+    background: rgba(99, 102, 241, 0.2);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: var(--text-primary);
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.2);
+}
+
+.tab-icon {
+    font-size: 1.6rem;
+}
+
+.tab-label {
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+.tab-desc {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.tab-btn.active .tab-desc {
+    color: #a5b4fc;
+}
+
+/* ---- Section ---- */
+.exam-section {
+    display: none;
+    animation: fadeIn 0.5s ease-out;
+}
+
+.exam-section.active {
+    display: block;
+}
+
+.section-header {
+    text-align: center;
+    margin-bottom: 28px;
+}
+
+.section-header h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.section-header p {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+/* ---- Sub Tabs (YKS) ---- */
+.sub-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+    padding: 4px;
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+}
+
+.sub-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 12px 16px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+    color: var(--text-secondary);
+    font-family: 'Inter', sans-serif;
+}
+
+.sub-tab span {
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.sub-tab small {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.sub-tab:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.sub-tab.active {
+    background: var(--gradient-2);
+    color: white;
+    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+}
+
+.sub-tab.active small {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.sub-section {
+    display: none;
+    animation: fadeIn 0.4s ease-out;
+}
+
+.sub-section.active {
+    display: block;
+}
+
+/* ---- AYT Type Selector ---- */
+.ayt-type-selector {
+    margin-bottom: 24px;
+}
+
+.ayt-type-label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    text-align: center;
+}
+
+.ayt-type-buttons {
+    display: flex;
+    gap: 8px;
+    padding: 4px;
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+}
+
+.ayt-type-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 10px 8px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+    color: var(--text-secondary);
+    font-family: 'Inter', sans-serif;
+}
+
+.ayt-type-btn .type-icon {
+    font-size: 1.2rem;
+}
+
+.ayt-type-btn span:not(.type-icon) {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.ayt-type-btn small {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+}
+
+.ayt-type-btn:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.ayt-type-btn.active {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: white;
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
+}
+
+.ayt-type-btn.active small {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.ayt-fields {
+    display: none;
+    animation: fadeIn 0.4s ease-out;
+}
+
+.ayt-fields.active {
+    display: block;
+}
+
+/* ---- Subject Cards Grid ---- */
+.subjects-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.subject-card {
+    background: var(--bg-card);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    padding: 20px;
+    transition: var(--transition);
+    position: relative;
+    overflow: hidden;
+}
+
+.subject-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--accent);
+    opacity: 0.7;
+    transition: var(--transition);
+}
+
+.subject-card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-active);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.subject-card:hover::before {
+    opacity: 1;
+    height: 4px;
+}
+
+.subject-card.full-width {
+    grid-column: 1 / -1;
+}
+
+.subject-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.subject-icon-wrap {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-light);
+    border-radius: var(--radius-sm);
+    font-size: 1.3rem;
+}
+
+.subject-info h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.question-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+/* ---- Input Row ---- */
+.input-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+}
+
+.input-group {
+    flex: 1;
+}
+
+.input-group label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    transition: var(--transition);
+}
+
+.input-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+}
+
+.input-wrapper.correct:focus-within {
+    border-color: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+
+.input-wrapper.wrong:focus-within {
+    border-color: #f43f5e;
+    box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.15);
+}
+
+.input-btn {
+    width: 36px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+    user-select: none;
+}
+
+.input-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.input-btn:active {
+    transform: scale(0.9);
+}
+
+.input-wrapper input {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    height: 40px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    text-align: center;
+    outline: none;
+    -moz-appearance: textfield;
+}
+
+.input-wrapper input::-webkit-outer-spin-button,
+.input-wrapper input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* ---- Net Display ---- */
+.net-display {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+    padding: 6px 12px;
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: var(--radius-sm);
+}
+
+.net-label {
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.net-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #a5b4fc;
+}
+
+/* ---- Action Buttons ---- */
+.action-buttons {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 28px;
+    animation: fadeInUp 0.6s ease-out 0.4s both;
+}
+
+.btn-calculate {
+    flex: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 16px 32px;
+    background: var(--gradient-1);
+    border: none;
+    border-radius: var(--radius-md);
+    color: white;
+    font-family: 'Inter', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: var(--transition);
+    position: relative;
+    overflow: hidden;
+}
+
+.btn-calculate::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+    transition: 0.5s;
+}
+
+.btn-calculate:hover::before {
+    left: 100%;
+}
+
+.btn-calculate:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4);
+}
+
+.btn-calculate:active {
+    transform: translateY(0);
+}
+
+.btn-reset {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px 24px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.btn-reset:hover {
+    background: rgba(244, 63, 94, 0.1);
+    border-color: rgba(244, 63, 94, 0.3);
+    color: #f43f5e;
+}
+
+.btn-icon {
+    font-size: 1.2rem;
+}
+
+/* ---- Result Panel ---- */
+.result-panel {
+    position: relative;
+    background: var(--bg-card);
+    backdrop-filter: blur(30px);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-xl);
+    padding: 32px;
+    overflow: hidden;
+    animation: resultReveal 0.6s ease-out;
+}
+
+.result-panel.hidden {
+    display: none;
+}
+
+.result-glow {
+    position: absolute;
+    top: -100px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 400px;
+    height: 200px;
+    background: radial-gradient(circle, rgba(99, 102, 241, 0.3) 0%, transparent 70%);
+    pointer-events: none;
+}
+
+.result-header {
+    text-align: center;
+    margin-bottom: 24px;
+    position: relative;
+}
+
+.result-header h3 {
+    font-size: 1.2rem;
+    font-weight: 700;
+}
+
+.result-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.result-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 20px 12px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    text-align: center;
+    transition: var(--transition);
+}
+
+.result-card:hover {
+    background: rgba(0, 0, 0, 0.3);
+    transform: translateY(-2px);
+}
+
+.result-card.main-score {
+    grid-column: 1 / -1;
+    padding: 28px 20px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(168, 85, 247, 0.15));
+    border-color: rgba(99, 102, 241, 0.3);
+}
+
+.result-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.result-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 2.8rem;
+    font-weight: 800;
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.1;
+}
+
+.result-value.small {
+    font-size: 1.6rem;
+    background: var(--gradient-3);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.result-range {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+/* ---- Net Breakdown ---- */
+.net-breakdown {
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-glass);
+}
+
+.net-breakdown h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.breakdown-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.breakdown-item {
+    display: grid;
+    grid-template-columns: 140px 1fr 60px;
+    align-items: center;
+    gap: 12px;
+}
+
+.breakdown-item .subject-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+.breakdown-item .bar-track {
+    height: 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 100px;
+    overflow: hidden;
+}
+
+.breakdown-item .bar-fill {
+    height: 100%;
+    border-radius: 100px;
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    min-width: 0;
+}
+
+.breakdown-item .bar-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-align: right;
+}
+
+/* ---- AYT Note ---- */
+.ayt-note {
+    padding: 12px 16px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+}
+
+.ayt-note p {
+    font-size: 0.8rem;
+    color: #fbbf24;
+    text-align: center;
+}
+
+/* ---- Ranking & Percentile Section ---- */
+.ranking-section {
+    margin-top: 28px;
+    padding-top: 28px;
+    border-top: 1px solid var(--border-glass);
+    animation: fadeInUp 0.5s ease-out;
+}
+
+.ranking-section h4 {
+    font-size: 1rem;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 24px;
+    background: var(--gradient-2);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.ranking-hero {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 40px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+}
+
+/* Circular Gauge */
+.percentile-gauge {
+    position: relative;
+    width: 160px;
+    height: 160px;
+    flex-shrink: 0;
+}
+
+.gauge-svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.gauge-track {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.06);
+    stroke-width: 8;
+}
+
+.gauge-fill {
+    fill: none;
+    stroke: url(#gaugeGradient);
+    stroke-width: 8;
+    stroke-linecap: round;
+    stroke-dasharray: 0 327;
+    transition: stroke-dasharray 1.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Fallback stroke color when gradient isn't available */
+.gauge-fill {
+    stroke: #6366f1;
+}
+
+.gauge-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+}
+
+.gauge-percent {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.6rem;
+    font-weight: 800;
+    background: var(--gradient-1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.gauge-sub {
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Ranking Info */
+.ranking-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 200px;
+}
+
+.ranking-number {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.rank-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.rank-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.8rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: -0.5px;
+}
+
+.ranking-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 100px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    width: fit-content;
+    transition: var(--transition);
+}
+
+.ranking-badge.badge-excellent {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+    color: #34d399;
+}
+
+.ranking-badge.badge-great {
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+}
+
+.ranking-badge.badge-good {
+    background: rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+}
+
+.ranking-badge.badge-average {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fbbf24;
+}
+
+.ranking-badge.badge-below {
+    background: rgba(244, 63, 94, 0.15);
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    color: #fb7185;
+}
+
+.ranking-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.detail-label {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.detail-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+/* Yearly Comparison Table */
+.yearly-comparison {
+    margin-top: 24px;
+}
+
+.yearly-comparison h5 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+    margin-bottom: 16px;
+    color: var(--text-secondary);
+}
+
+.yearly-table-wrap {
+    overflow-x: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-glass);
+}
+
+.yearly-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.yearly-table thead {
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.yearly-table th {
+    padding: 12px 16px;
+    font-weight: 700;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #a5b4fc;
+    text-align: center;
+    border-bottom: 1px solid var(--border-glass);
+}
+
+.yearly-table td {
+    padding: 11px 16px;
+    text-align: center;
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+
+.yearly-table tbody tr {
+    transition: var(--transition);
+}
+
+.yearly-table tbody tr:hover {
+    background: rgba(99, 102, 241, 0.08);
+}
+
+.yearly-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.yearly-table .year-cell {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.yearly-table .highlight-row {
+    background: rgba(99, 102, 241, 0.06);
+}
+
+.yearly-table .highlight-row td {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.yearly-table .percentile-cell {
+    font-weight: 700;
+}
+
+.yearly-table .percentile-high {
+    color: #34d399;
+}
+
+.yearly-table .percentile-mid {
+    color: #60a5fa;
+}
+
+.yearly-table .percentile-low {
+    color: #fbbf24;
+}
+
+.yearly-table .percentile-vlow {
+    color: #fb7185;
+}
+
+/* Gauge animation */
+@keyframes gaugeReveal {
+    from {
+        stroke-dasharray: 0 327;
+    }
+}
+
+/* ---- Footer ---- */
+.app-footer {
+    text-align: center;
+    margin-top: 48px;
+    padding: 24px 20px;
+    border-top: 1px solid var(--border-glass);
+}
+
+.app-footer p {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.footer-credit {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+/* ---- Animations ---- */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes fadeInDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes resultReveal {
+    from {
+        opacity: 0;
+        transform: translateY(30px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes scoreCount {
+    from { transform: scale(0.8); opacity: 0; }
+    50% { transform: scale(1.05); }
+    to { transform: scale(1); opacity: 1; }
+}
+
+.score-animate {
+    animation: scoreCount 0.5s ease-out;
+}
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.3);
+    border-radius: 100px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(99, 102, 241, 0.5);
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 768px) {
+    .app-container {
+        padding: 16px 12px 40px;
+    }
+
+    .title-gradient {
+        font-size: 2.2rem;
+    }
+
+    .title-sub {
+        font-size: 1.1rem;
+    }
+
+    .subjects-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .input-row {
+        flex-wrap: wrap;
+    }
+
+    .input-group {
+        min-width: calc(50% - 6px);
+    }
+
+    .net-display {
+        width: 100%;
+        flex-direction: row;
+        justify-content: center;
+        gap: 8px;
+    }
+
+    .result-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .result-value {
+        font-size: 2rem;
+    }
+
+    .result-value.small {
+        font-size: 1.3rem;
+    }
+
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .breakdown-item {
+        grid-template-columns: 100px 1fr 50px;
+    }
+
+    .breakdown-item .subject-name {
+        font-size: 0.75rem;
+    }
+
+    .ayt-type-buttons {
+        flex-wrap: wrap;
+    }
+
+    .ayt-type-btn {
+        min-width: calc(50% - 4px);
+    }
+
+    .result-panel {
+        padding: 20px 16px;
+    }
+
+    .ranking-hero {
+        flex-direction: column;
+        gap: 24px;
+        text-align: center;
+    }
+
+    .ranking-info {
+        align-items: center;
+        min-width: unset;
+    }
+
+    .ranking-number {
+        align-items: center;
+    }
+
+    .percentile-gauge {
+        width: 140px;
+        height: 140px;
+    }
+
+    .yearly-table th,
+    .yearly-table td {
+        padding: 8px 10px;
+        font-size: 0.75rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .title-gradient {
+        font-size: 1.8rem;
+    }
+
+    .tab-label {
+        font-size: 0.95rem;
+    }
+
+    .result-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .breakdown-item {
+        grid-template-columns: 80px 1fr 45px;
+    }
+
+    .rank-value {
+        font-size: 1.4rem;
+    }
+
+    .gauge-percent {
+        font-size: 1.3rem;
+    }
+}
+
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="LGS ve YKS sınav puanlarınızı kolayca hesaplayın. Türkçe, Matematik, Fen, Sosyal ve daha fazlası için puan hesaplama aracı.">
+    <title>LGS & YKS Puan Hesaplama | Sınav Puanı Hesapla</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+<body>
+    <!-- Animated Background -->
+    <div class="bg-animation">
+        <div class="bg-orb bg-orb-1"></div>
+        <div class="bg-orb bg-orb-2"></div>
+        <div class="bg-orb bg-orb-3"></div>
+        <div class="bg-orb bg-orb-4"></div>
+    </div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header" id="app-header">
+            <div class="header-badge">
+                <span class="badge-icon">📐</span>
+                <span class="badge-text">Sınav Hesaplama</span>
+            </div>
+            <h1 class="header-title">
+                <span class="title-gradient">LGS & YKS</span>
+                <span class="title-sub">Puan Hesaplama</span>
+            </h1>
+            <p class="header-desc">Sınav puanlarınızı kolayca hesaplayın ve hedeflerinize ulaşın</p>
+        </header>
+
+        <!-- Main Tabs -->
+        <nav class="main-tabs" id="main-tabs">
+            <button class="tab-btn active" data-tab="lgs" id="tab-lgs">
+                <span class="tab-icon">🎓</span>
+                <span class="tab-label">LGS</span>
+                <span class="tab-desc">Liseye Geçiş</span>
+            </button>
+            <button class="tab-btn" data-tab="yks" id="tab-yks">
+                <span class="tab-icon">🏛️</span>
+                <span class="tab-label">YKS</span>
+                <span class="tab-desc">Üniversite Sınavı</span>
+            </button>
+        </nav>
+
+        <!-- LGS Section -->
+        <section class="exam-section active" id="section-lgs">
+            <div class="section-header">
+                <h2>LGS Puan Hesaplama</h2>
+                <p>Doğru ve yanlış sayılarınızı girerek LGS puanınızı hesaplayın</p>
+            </div>
+
+            <div class="subjects-grid" id="lgs-subjects">
+                <!-- Türkçe -->
+                <div class="subject-card" data-subject="turkce" style="--accent: #6366f1; --accent-light: rgba(99,102,241,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">📚</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>Türkçe</h3>
+                            <span class="question-count">20 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-turkce-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-turkce-dogru', -1, 20)">−</button>
+                                <input type="number" id="lgs-turkce-dogru" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-turkce-dogru', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-turkce-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-turkce-yanlis', -1, 20)">−</button>
+                                <input type="number" id="lgs-turkce-yanlis" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-turkce-yanlis', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-turkce-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Matematik -->
+                <div class="subject-card" data-subject="matematik" style="--accent: #f43f5e; --accent-light: rgba(244,63,94,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">🔢</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>Matematik</h3>
+                            <span class="question-count">20 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-matematik-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-matematik-dogru', -1, 20)">−</button>
+                                <input type="number" id="lgs-matematik-dogru" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-matematik-dogru', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-matematik-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-matematik-yanlis', -1, 20)">−</button>
+                                <input type="number" id="lgs-matematik-yanlis" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-matematik-yanlis', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-matematik-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fen Bilimleri -->
+                <div class="subject-card" data-subject="fen" style="--accent: #10b981; --accent-light: rgba(16,185,129,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">🔬</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>Fen Bilimleri</h3>
+                            <span class="question-count">20 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-fen-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-fen-dogru', -1, 20)">−</button>
+                                <input type="number" id="lgs-fen-dogru" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-fen-dogru', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-fen-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-fen-yanlis', -1, 20)">−</button>
+                                <input type="number" id="lgs-fen-yanlis" min="0" max="20" value="0" oninput="validateAndCalculateLGS(this, 20)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-fen-yanlis', 1, 20)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-fen-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- İnkılap Tarihi -->
+                <div class="subject-card" data-subject="inkilap" style="--accent: #f59e0b; --accent-light: rgba(245,158,11,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">📜</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>T.C. İnkılap Tarihi</h3>
+                            <span class="question-count">10 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-inkilap-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-inkilap-dogru', -1, 10)">−</button>
+                                <input type="number" id="lgs-inkilap-dogru" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-inkilap-dogru', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-inkilap-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-inkilap-yanlis', -1, 10)">−</button>
+                                <input type="number" id="lgs-inkilap-yanlis" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-inkilap-yanlis', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-inkilap-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Din Kültürü -->
+                <div class="subject-card" data-subject="din" style="--accent: #8b5cf6; --accent-light: rgba(139,92,246,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">🕌</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>Din Kültürü</h3>
+                            <span class="question-count">10 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-din-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-din-dogru', -1, 10)">−</button>
+                                <input type="number" id="lgs-din-dogru" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-din-dogru', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-din-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-din-yanlis', -1, 10)">−</button>
+                                <input type="number" id="lgs-din-yanlis" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-din-yanlis', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-din-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Yabancı Dil -->
+                <div class="subject-card" data-subject="dil" style="--accent: #06b6d4; --accent-light: rgba(6,182,212,0.15);">
+                    <div class="subject-header">
+                        <div class="subject-icon-wrap">
+                            <span class="subject-icon">🌍</span>
+                        </div>
+                        <div class="subject-info">
+                            <h3>Yabancı Dil</h3>
+                            <span class="question-count">10 Soru</span>
+                        </div>
+                    </div>
+                    <div class="input-row">
+                        <div class="input-group">
+                            <label for="lgs-dil-dogru">Doğru</label>
+                            <div class="input-wrapper correct">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-dil-dogru', -1, 10)">−</button>
+                                <input type="number" id="lgs-dil-dogru" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-dil-dogru', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label for="lgs-dil-yanlis">Yanlış</label>
+                            <div class="input-wrapper wrong">
+                                <button class="input-btn minus" onclick="adjustValue('lgs-dil-yanlis', -1, 10)">−</button>
+                                <input type="number" id="lgs-dil-yanlis" min="0" max="10" value="0" oninput="validateAndCalculateLGS(this, 10)">
+                                <button class="input-btn plus" onclick="adjustValue('lgs-dil-yanlis', 1, 10)">+</button>
+                            </div>
+                        </div>
+                        <div class="net-display">
+                            <span class="net-label">Net</span>
+                            <span class="net-value" id="lgs-dil-net">0.00</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LGS Action Buttons -->
+            <div class="action-buttons">
+                <button class="btn-calculate" id="btn-lgs-calculate" onclick="calculateLGS()">
+                    <span class="btn-icon">⚡</span>
+                    <span>Puanı Hesapla</span>
+                </button>
+                <button class="btn-reset" id="btn-lgs-reset" onclick="resetLGS()">
+                    <span class="btn-icon">🔄</span>
+                    <span>Sıfırla</span>
+                </button>
+            </div>
+
+            <!-- LGS Result -->
+            <div class="result-panel hidden" id="lgs-result">
+                <div class="result-glow"></div>
+                <div class="result-header">
+                    <h3>📊 LGS Sonuçlarınız</h3>
+                </div>
+                <div class="result-grid">
+                    <div class="result-card main-score">
+                        <span class="result-label">Tahmini LGS Puanı</span>
+                        <span class="result-value" id="lgs-puan">0.00</span>
+                        <span class="result-range">200 – 500 puan aralığı</span>
+                    </div>
+                    <div class="result-card">
+                        <span class="result-label">Toplam Net</span>
+                        <span class="result-value small" id="lgs-toplam-net">0.00</span>
+                        <span class="result-range">/ 90</span>
+                    </div>
+                    <div class="result-card">
+                        <span class="result-label">Toplam Doğru</span>
+                        <span class="result-value small" id="lgs-toplam-dogru">0</span>
+                        <span class="result-range">/ 90</span>
+                    </div>
+                    <div class="result-card">
+                        <span class="result-label">Toplam Yanlış</span>
+                        <span class="result-value small" id="lgs-toplam-yanlis">0</span>
+                        <span class="result-range">/ 90</span>
+                    </div>
+                    <div class="result-card">
+                        <span class="result-label">Boş</span>
+                        <span class="result-value small" id="lgs-toplam-bos">90</span>
+                        <span class="result-range">/ 90</span>
+                    </div>
+                </div>
+                <!-- Net Breakdown -->
+                <div class="net-breakdown" id="lgs-net-breakdown">
+                    <h4>📋 Ders Bazlı Net Dağılımı</h4>
+                    <div class="breakdown-bars" id="lgs-breakdown-bars">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+
+                <!-- Ranking & Percentile Section -->
+                <div class="ranking-section" id="lgs-ranking-section">
+                    <h4>🏆 Tahmini Sıralama & Yüzdelik Dilim</h4>
+                    <div class="ranking-hero">
+                        <div class="percentile-gauge">
+                            <svg viewBox="0 0 120 120" class="gauge-svg">
+                                <circle cx="60" cy="60" r="52" class="gauge-track"/>
+                                <circle cx="60" cy="60" r="52" class="gauge-fill" id="lgs-gauge-fill" stroke-dasharray="0 327" />
+                            </svg>
+                            <div class="gauge-center">
+                                <span class="gauge-percent" id="lgs-percentile">%0</span>
+                                <span class="gauge-sub">Yüzdelik</span>
+                            </div>
+                        </div>
+                        <div class="ranking-info">
+                            <div class="ranking-number">
+                                <span class="rank-label">Tahmini Sıralama</span>
+                                <span class="rank-value" id="lgs-siralama">—</span>
+                            </div>
+                            <div class="ranking-badge" id="lgs-badge">—</div>
+                            <div class="ranking-detail">
+                                <span class="detail-label">Ortalama Aday Sayısı</span>
+                                <span class="detail-value" id="lgs-avg-students">~1.200.000</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="yearly-comparison">
+                        <h5>📅 Son 5 Yıl Karşılaştırması</h5>
+                        <div class="yearly-table-wrap">
+                            <table class="yearly-table" id="lgs-yearly-table">
+                                <thead>
+                                    <tr>
+                                        <th>Yıl</th>
+                                        <th>Aday Sayısı</th>
+                                        <th>Tahmini Sıralama</th>
+                                        <th>Yüzdelik Dilim</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="lgs-yearly-tbody">
+                                    <!-- Filled by JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- YKS Section -->
+        <section class="exam-section" id="section-yks">
+            <div class="section-header">
+                <h2>YKS Puan Hesaplama</h2>
+                <p>TYT ve AYT sınavlarının puanlarını ayrı ayrı hesaplayın</p>
+            </div>
+
+            <!-- YKS Sub Tabs -->
+            <div class="sub-tabs" id="yks-sub-tabs">
+                <button class="sub-tab active" data-subtab="tyt" id="subtab-tyt">
+                    <span>📝 TYT</span>
+                    <small>Temel Yeterlilik</small>
+                </button>
+                <button class="sub-tab" data-subtab="ayt" id="subtab-ayt">
+                    <span>📖 AYT</span>
+                    <small>Alan Yeterlilik</small>
+                </button>
+            </div>
+
+            <!-- TYT Sub-Section -->
+            <div class="sub-section active" id="subsection-tyt">
+                <div class="subjects-grid" id="tyt-subjects">
+                    <!-- Türkçe -->
+                    <div class="subject-card" style="--accent: #6366f1; --accent-light: rgba(99,102,241,0.15);">
+                        <div class="subject-header">
+                            <div class="subject-icon-wrap">
+                                <span class="subject-icon">📚</span>
+                            </div>
+                            <div class="subject-info">
+                                <h3>Türkçe</h3>
+                                <span class="question-count">40 Soru</span>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label for="tyt-turkce-dogru">Doğru</label>
+                                <div class="input-wrapper correct">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-turkce-dogru', -1, 40)">−</button>
+                                    <input type="number" id="tyt-turkce-dogru" min="0" max="40" value="0" oninput="validateAndCalculateYKS(this, 40)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-turkce-dogru', 1, 40)">+</button>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label for="tyt-turkce-yanlis">Yanlış</label>
+                                <div class="input-wrapper wrong">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-turkce-yanlis', -1, 40)">−</button>
+                                    <input type="number" id="tyt-turkce-yanlis" min="0" max="40" value="0" oninput="validateAndCalculateYKS(this, 40)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-turkce-yanlis', 1, 40)">+</button>
+                                </div>
+                            </div>
+                            <div class="net-display">
+                                <span class="net-label">Net</span>
+                                <span class="net-value" id="tyt-turkce-net">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Sosyal Bilimler -->
+                    <div class="subject-card" style="--accent: #f59e0b; --accent-light: rgba(245,158,11,0.15);">
+                        <div class="subject-header">
+                            <div class="subject-icon-wrap">
+                                <span class="subject-icon">🏛️</span>
+                            </div>
+                            <div class="subject-info">
+                                <h3>Sosyal Bilimler</h3>
+                                <span class="question-count">20 Soru</span>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label for="tyt-sosyal-dogru">Doğru</label>
+                                <div class="input-wrapper correct">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-sosyal-dogru', -1, 20)">−</button>
+                                    <input type="number" id="tyt-sosyal-dogru" min="0" max="20" value="0" oninput="validateAndCalculateYKS(this, 20)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-sosyal-dogru', 1, 20)">+</button>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label for="tyt-sosyal-yanlis">Yanlış</label>
+                                <div class="input-wrapper wrong">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-sosyal-yanlis', -1, 20)">−</button>
+                                    <input type="number" id="tyt-sosyal-yanlis" min="0" max="20" value="0" oninput="validateAndCalculateYKS(this, 20)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-sosyal-yanlis', 1, 20)">+</button>
+                                </div>
+                            </div>
+                            <div class="net-display">
+                                <span class="net-label">Net</span>
+                                <span class="net-value" id="tyt-sosyal-net">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Temel Matematik -->
+                    <div class="subject-card" style="--accent: #f43f5e; --accent-light: rgba(244,63,94,0.15);">
+                        <div class="subject-header">
+                            <div class="subject-icon-wrap">
+                                <span class="subject-icon">🔢</span>
+                            </div>
+                            <div class="subject-info">
+                                <h3>Temel Matematik</h3>
+                                <span class="question-count">40 Soru</span>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label for="tyt-matematik-dogru">Doğru</label>
+                                <div class="input-wrapper correct">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-matematik-dogru', -1, 40)">−</button>
+                                    <input type="number" id="tyt-matematik-dogru" min="0" max="40" value="0" oninput="validateAndCalculateYKS(this, 40)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-matematik-dogru', 1, 40)">+</button>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label for="tyt-matematik-yanlis">Yanlış</label>
+                                <div class="input-wrapper wrong">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-matematik-yanlis', -1, 40)">−</button>
+                                    <input type="number" id="tyt-matematik-yanlis" min="0" max="40" value="0" oninput="validateAndCalculateYKS(this, 40)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-matematik-yanlis', 1, 40)">+</button>
+                                </div>
+                            </div>
+                            <div class="net-display">
+                                <span class="net-label">Net</span>
+                                <span class="net-value" id="tyt-matematik-net">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fen Bilimleri -->
+                    <div class="subject-card" style="--accent: #10b981; --accent-light: rgba(16,185,129,0.15);">
+                        <div class="subject-header">
+                            <div class="subject-icon-wrap">
+                                <span class="subject-icon">🔬</span>
+                            </div>
+                            <div class="subject-info">
+                                <h3>Fen Bilimleri</h3>
+                                <span class="question-count">20 Soru</span>
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label for="tyt-fen-dogru">Doğru</label>
+                                <div class="input-wrapper correct">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-fen-dogru', -1, 20)">−</button>
+                                    <input type="number" id="tyt-fen-dogru" min="0" max="20" value="0" oninput="validateAndCalculateYKS(this, 20)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-fen-dogru', 1, 20)">+</button>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label for="tyt-fen-yanlis">Yanlış</label>
+                                <div class="input-wrapper wrong">
+                                    <button class="input-btn minus" onclick="adjustValue('tyt-fen-yanlis', -1, 20)">−</button>
+                                    <input type="number" id="tyt-fen-yanlis" min="0" max="20" value="0" oninput="validateAndCalculateYKS(this, 20)">
+                                    <button class="input-btn plus" onclick="adjustValue('tyt-fen-yanlis', 1, 20)">+</button>
+                                </div>
+                            </div>
+                            <div class="net-display">
+                                <span class="net-label">Net</span>
+                                <span class="net-value" id="tyt-fen-net">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TYT Action Buttons -->
+                <div class="action-buttons">
+                    <button class="btn-calculate" id="btn-tyt-calculate" onclick="calculateTYT()">
+                        <span class="btn-icon">⚡</span>
+                        <span>TYT Puanını Hesapla</span>
+                    </button>
+                    <button class="btn-reset" id="btn-tyt-reset" onclick="resetTYT()">
+                        <span class="btn-icon">🔄</span>
+                        <span>Sıfırla</span>
+                    </button>
+                </div>
+
+                <!-- TYT Result -->
+                <div class="result-panel hidden" id="tyt-result">
+                    <div class="result-glow"></div>
+                    <div class="result-header">
+                        <h3>📊 TYT Sonuçlarınız</h3>
+                    </div>
+                    <div class="result-grid">
+                        <div class="result-card main-score">
+                            <span class="result-label">Tahmini TYT Puanı</span>
+                            <span class="result-value" id="tyt-puan">0.00</span>
+                            <span class="result-range">100 – 500 puan aralığı</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Toplam Net</span>
+                            <span class="result-value small" id="tyt-toplam-net">0.00</span>
+                            <span class="result-range">/ 120</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Toplam Doğru</span>
+                            <span class="result-value small" id="tyt-toplam-dogru">0</span>
+                            <span class="result-range">/ 120</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Toplam Yanlış</span>
+                            <span class="result-value small" id="tyt-toplam-yanlis">0</span>
+                            <span class="result-range">/ 120</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Boş</span>
+                            <span class="result-value small" id="tyt-toplam-bos">120</span>
+                            <span class="result-range">/ 120</span>
+                        </div>
+                    </div>
+                    <div class="net-breakdown" id="tyt-net-breakdown">
+                        <h4>📋 Ders Bazlı Net Dağılımı</h4>
+                        <div class="breakdown-bars" id="tyt-breakdown-bars"></div>
+                    </div>
+
+                    <!-- Ranking & Percentile Section -->
+                    <div class="ranking-section" id="tyt-ranking-section">
+                        <h4>🏆 Tahmini Sıralama & Yüzdelik Dilim</h4>
+                        <div class="ranking-hero">
+                            <div class="percentile-gauge">
+                                <svg viewBox="0 0 120 120" class="gauge-svg">
+                                    <circle cx="60" cy="60" r="52" class="gauge-track"/>
+                                    <circle cx="60" cy="60" r="52" class="gauge-fill" id="tyt-gauge-fill" stroke-dasharray="0 327" />
+                                </svg>
+                                <div class="gauge-center">
+                                    <span class="gauge-percent" id="tyt-percentile">%0</span>
+                                    <span class="gauge-sub">Yüzdelik</span>
+                                </div>
+                            </div>
+                            <div class="ranking-info">
+                                <div class="ranking-number">
+                                    <span class="rank-label">Tahmini Sıralama</span>
+                                    <span class="rank-value" id="tyt-siralama">—</span>
+                                </div>
+                                <div class="ranking-badge" id="tyt-badge">—</div>
+                                <div class="ranking-detail">
+                                    <span class="detail-label">Ortalama Aday Sayısı</span>
+                                    <span class="detail-value" id="tyt-avg-students">~2.700.000</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="yearly-comparison">
+                            <h5>📅 Son 5 Yıl Karşılaştırması</h5>
+                            <div class="yearly-table-wrap">
+                                <table class="yearly-table" id="tyt-yearly-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Yıl</th>
+                                            <th>Aday Sayısı</th>
+                                            <th>Tahmini Sıralama</th>
+                                            <th>Yüzdelik Dilim</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="tyt-yearly-tbody">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AYT Sub-Section -->
+            <div class="sub-section" id="subsection-ayt">
+                <div class="ayt-type-selector" id="ayt-type-selector">
+                    <label class="ayt-type-label">Puan Türünü Seçin:</label>
+                    <div class="ayt-type-buttons">
+                        <button class="ayt-type-btn active" data-type="say" id="ayt-type-say" onclick="switchAYTType('say')">
+                            <span class="type-icon">🧮</span>
+                            <span>SAY</span>
+                            <small>Sayısal</small>
+                        </button>
+                        <button class="ayt-type-btn" data-type="ea" id="ayt-type-ea" onclick="switchAYTType('ea')">
+                            <span class="type-icon">⚖️</span>
+                            <span>EA</span>
+                            <small>Eşit Ağırlık</small>
+                        </button>
+                        <button class="ayt-type-btn" data-type="soz" id="ayt-type-soz" onclick="switchAYTType('soz')">
+                            <span class="type-icon">📖</span>
+                            <span>SÖZ</span>
+                            <small>Sözel</small>
+                        </button>
+                        <button class="ayt-type-btn" data-type="dil" id="ayt-type-dil" onclick="switchAYTType('dil')">
+                            <span class="type-icon">🌐</span>
+                            <span>DİL</span>
+                            <small>Yabancı Dil</small>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- SAY Fields -->
+                <div class="ayt-fields active" id="ayt-fields-say">
+                    <div class="subjects-grid">
+                        <div class="subject-card" style="--accent: #f43f5e; --accent-light: rgba(244,63,94,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🔢</span></div>
+                                <div class="subject-info"><h3>Matematik</h3><span class="question-count">40 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-say-mat-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-mat-dogru', -1, 40)">−</button>
+                                        <input type="number" id="ayt-say-mat-dogru" min="0" max="40" value="0" oninput="validateInput(this, 40)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-mat-dogru', 1, 40)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-say-mat-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-mat-yanlis', -1, 40)">−</button>
+                                        <input type="number" id="ayt-say-mat-yanlis" min="0" max="40" value="0" oninput="validateInput(this, 40)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-mat-yanlis', 1, 40)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-say-mat-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #8b5cf6; --accent-light: rgba(139,92,246,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">⚛️</span></div>
+                                <div class="subject-info"><h3>Fizik</h3><span class="question-count">14 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-say-fiz-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-fiz-dogru', -1, 14)">−</button>
+                                        <input type="number" id="ayt-say-fiz-dogru" min="0" max="14" value="0" oninput="validateInput(this, 14)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-fiz-dogru', 1, 14)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-say-fiz-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-fiz-yanlis', -1, 14)">−</button>
+                                        <input type="number" id="ayt-say-fiz-yanlis" min="0" max="14" value="0" oninput="validateInput(this, 14)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-fiz-yanlis', 1, 14)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-say-fiz-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #10b981; --accent-light: rgba(16,185,129,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🧪</span></div>
+                                <div class="subject-info"><h3>Kimya</h3><span class="question-count">13 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-say-kim-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-kim-dogru', -1, 13)">−</button>
+                                        <input type="number" id="ayt-say-kim-dogru" min="0" max="13" value="0" oninput="validateInput(this, 13)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-kim-dogru', 1, 13)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-say-kim-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-kim-yanlis', -1, 13)">−</button>
+                                        <input type="number" id="ayt-say-kim-yanlis" min="0" max="13" value="0" oninput="validateInput(this, 13)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-kim-yanlis', 1, 13)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-say-kim-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #06b6d4; --accent-light: rgba(6,182,212,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🧬</span></div>
+                                <div class="subject-info"><h3>Biyoloji</h3><span class="question-count">13 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-say-bio-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-bio-dogru', -1, 13)">−</button>
+                                        <input type="number" id="ayt-say-bio-dogru" min="0" max="13" value="0" oninput="validateInput(this, 13)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-bio-dogru', 1, 13)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-say-bio-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-say-bio-yanlis', -1, 13)">−</button>
+                                        <input type="number" id="ayt-say-bio-yanlis" min="0" max="13" value="0" oninput="validateInput(this, 13)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-say-bio-yanlis', 1, 13)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-say-bio-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- EA Fields -->
+                <div class="ayt-fields" id="ayt-fields-ea">
+                    <div class="subjects-grid">
+                        <div class="subject-card" style="--accent: #f43f5e; --accent-light: rgba(244,63,94,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🔢</span></div>
+                                <div class="subject-info"><h3>Matematik</h3><span class="question-count">40 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-ea-mat-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-mat-dogru', -1, 40)">−</button>
+                                        <input type="number" id="ayt-ea-mat-dogru" min="0" max="40" value="0" oninput="validateInput(this, 40)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-mat-dogru', 1, 40)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-ea-mat-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-mat-yanlis', -1, 40)">−</button>
+                                        <input type="number" id="ayt-ea-mat-yanlis" min="0" max="40" value="0" oninput="validateInput(this, 40)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-mat-yanlis', 1, 40)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-ea-mat-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #6366f1; --accent-light: rgba(99,102,241,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">✍️</span></div>
+                                <div class="subject-info"><h3>Edebiyat</h3><span class="question-count">24 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-ea-edb-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-edb-dogru', -1, 24)">−</button>
+                                        <input type="number" id="ayt-ea-edb-dogru" min="0" max="24" value="0" oninput="validateInput(this, 24)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-edb-dogru', 1, 24)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-ea-edb-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-edb-yanlis', -1, 24)">−</button>
+                                        <input type="number" id="ayt-ea-edb-yanlis" min="0" max="24" value="0" oninput="validateInput(this, 24)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-edb-yanlis', 1, 24)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-ea-edb-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #f59e0b; --accent-light: rgba(245,158,11,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">📜</span></div>
+                                <div class="subject-info"><h3>Tarih-1</h3><span class="question-count">10 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-ea-tar1-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-tar1-dogru', -1, 10)">−</button>
+                                        <input type="number" id="ayt-ea-tar1-dogru" min="0" max="10" value="0" oninput="validateInput(this, 10)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-tar1-dogru', 1, 10)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-ea-tar1-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-tar1-yanlis', -1, 10)">−</button>
+                                        <input type="number" id="ayt-ea-tar1-yanlis" min="0" max="10" value="0" oninput="validateInput(this, 10)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-tar1-yanlis', 1, 10)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-ea-tar1-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #10b981; --accent-light: rgba(16,185,129,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🗺️</span></div>
+                                <div class="subject-info"><h3>Coğrafya-1</h3><span class="question-count">6 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-ea-cog1-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-cog1-dogru', -1, 6)">−</button>
+                                        <input type="number" id="ayt-ea-cog1-dogru" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-cog1-dogru', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-ea-cog1-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-ea-cog1-yanlis', -1, 6)">−</button>
+                                        <input type="number" id="ayt-ea-cog1-yanlis" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-ea-cog1-yanlis', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-ea-cog1-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SÖZ Fields -->
+                <div class="ayt-fields" id="ayt-fields-soz">
+                    <div class="subjects-grid">
+                        <div class="subject-card" style="--accent: #6366f1; --accent-light: rgba(99,102,241,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">✍️</span></div>
+                                <div class="subject-info"><h3>Edebiyat</h3><span class="question-count">24 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-edb-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-edb-dogru', -1, 24)">−</button>
+                                        <input type="number" id="ayt-soz-edb-dogru" min="0" max="24" value="0" oninput="validateInput(this, 24)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-edb-dogru', 1, 24)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-edb-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-edb-yanlis', -1, 24)">−</button>
+                                        <input type="number" id="ayt-soz-edb-yanlis" min="0" max="24" value="0" oninput="validateInput(this, 24)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-edb-yanlis', 1, 24)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-edb-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #f59e0b; --accent-light: rgba(245,158,11,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">📜</span></div>
+                                <div class="subject-info"><h3>Tarih-1</h3><span class="question-count">10 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-tar1-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-tar1-dogru', -1, 10)">−</button>
+                                        <input type="number" id="ayt-soz-tar1-dogru" min="0" max="10" value="0" oninput="validateInput(this, 10)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-tar1-dogru', 1, 10)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-tar1-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-tar1-yanlis', -1, 10)">−</button>
+                                        <input type="number" id="ayt-soz-tar1-yanlis" min="0" max="10" value="0" oninput="validateInput(this, 10)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-tar1-yanlis', 1, 10)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-tar1-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #10b981; --accent-light: rgba(16,185,129,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🗺️</span></div>
+                                <div class="subject-info"><h3>Coğrafya-1</h3><span class="question-count">6 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-cog1-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-cog1-dogru', -1, 6)">−</button>
+                                        <input type="number" id="ayt-soz-cog1-dogru" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-cog1-dogru', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-cog1-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-cog1-yanlis', -1, 6)">−</button>
+                                        <input type="number" id="ayt-soz-cog1-yanlis" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-cog1-yanlis', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-cog1-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #8b5cf6; --accent-light: rgba(139,92,246,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">📜</span></div>
+                                <div class="subject-info"><h3>Tarih-2</h3><span class="question-count">11 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-tar2-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-tar2-dogru', -1, 11)">−</button>
+                                        <input type="number" id="ayt-soz-tar2-dogru" min="0" max="11" value="0" oninput="validateInput(this, 11)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-tar2-dogru', 1, 11)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-tar2-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-tar2-yanlis', -1, 11)">−</button>
+                                        <input type="number" id="ayt-soz-tar2-yanlis" min="0" max="11" value="0" oninput="validateInput(this, 11)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-tar2-yanlis', 1, 11)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-tar2-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #06b6d4; --accent-light: rgba(6,182,212,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🗺️</span></div>
+                                <div class="subject-info"><h3>Coğrafya-2</h3><span class="question-count">11 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-cog2-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-cog2-dogru', -1, 11)">−</button>
+                                        <input type="number" id="ayt-soz-cog2-dogru" min="0" max="11" value="0" oninput="validateInput(this, 11)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-cog2-dogru', 1, 11)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-cog2-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-cog2-yanlis', -1, 11)">−</button>
+                                        <input type="number" id="ayt-soz-cog2-yanlis" min="0" max="11" value="0" oninput="validateInput(this, 11)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-cog2-yanlis', 1, 11)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-cog2-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #f43f5e; --accent-light: rgba(244,63,94,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🤔</span></div>
+                                <div class="subject-info"><h3>Felsefe</h3><span class="question-count">12 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-fel-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-fel-dogru', -1, 12)">−</button>
+                                        <input type="number" id="ayt-soz-fel-dogru" min="0" max="12" value="0" oninput="validateInput(this, 12)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-fel-dogru', 1, 12)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-fel-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-fel-yanlis', -1, 12)">−</button>
+                                        <input type="number" id="ayt-soz-fel-yanlis" min="0" max="12" value="0" oninput="validateInput(this, 12)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-fel-yanlis', 1, 12)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-fel-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="subject-card" style="--accent: #ec4899; --accent-light: rgba(236,72,153,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">⚖️</span></div>
+                                <div class="subject-info"><h3>Din Kültürü</h3><span class="question-count">6 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-soz-din-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-din-dogru', -1, 6)">−</button>
+                                        <input type="number" id="ayt-soz-din-dogru" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-din-dogru', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-soz-din-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-soz-din-yanlis', -1, 6)">−</button>
+                                        <input type="number" id="ayt-soz-din-yanlis" min="0" max="6" value="0" oninput="validateInput(this, 6)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-soz-din-yanlis', 1, 6)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-soz-din-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DİL Fields -->
+                <div class="ayt-fields" id="ayt-fields-dil">
+                    <div class="subjects-grid">
+                        <div class="subject-card full-width" style="--accent: #06b6d4; --accent-light: rgba(6,182,212,0.15);">
+                            <div class="subject-header">
+                                <div class="subject-icon-wrap"><span class="subject-icon">🌐</span></div>
+                                <div class="subject-info"><h3>Yabancı Dil</h3><span class="question-count">80 Soru</span></div>
+                            </div>
+                            <div class="input-row">
+                                <div class="input-group">
+                                    <label for="ayt-dil-dogru">Doğru</label>
+                                    <div class="input-wrapper correct">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-dil-dogru', -1, 80)">−</button>
+                                        <input type="number" id="ayt-dil-dogru" min="0" max="80" value="0" oninput="validateInput(this, 80)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-dil-dogru', 1, 80)">+</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label for="ayt-dil-yanlis">Yanlış</label>
+                                    <div class="input-wrapper wrong">
+                                        <button class="input-btn minus" onclick="adjustValue('ayt-dil-yanlis', -1, 80)">−</button>
+                                        <input type="number" id="ayt-dil-yanlis" min="0" max="80" value="0" oninput="validateInput(this, 80)">
+                                        <button class="input-btn plus" onclick="adjustValue('ayt-dil-yanlis', 1, 80)">+</button>
+                                    </div>
+                                </div>
+                                <div class="net-display">
+                                    <span class="net-label">Net</span>
+                                    <span class="net-value" id="ayt-dil-net">0.00</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AYT Action Buttons -->
+                <div class="action-buttons">
+                    <button class="btn-calculate" id="btn-ayt-calculate" onclick="calculateAYT()">
+                        <span class="btn-icon">⚡</span>
+                        <span>AYT Puanını Hesapla</span>
+                    </button>
+                    <button class="btn-reset" id="btn-ayt-reset" onclick="resetAYT()">
+                        <span class="btn-icon">🔄</span>
+                        <span>Sıfırla</span>
+                    </button>
+                </div>
+
+                <!-- AYT Result -->
+                <div class="result-panel hidden" id="ayt-result">
+                    <div class="result-glow"></div>
+                    <div class="result-header">
+                        <h3>📊 AYT Sonuçlarınız</h3>
+                    </div>
+                    <div class="result-grid">
+                        <div class="result-card main-score">
+                            <span class="result-label" id="ayt-puan-label">Tahmini SAY Puanı</span>
+                            <span class="result-value" id="ayt-puan">0.00</span>
+                            <span class="result-range">TYT puanınız da hesaplamaya dahildir</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">AYT Net</span>
+                            <span class="result-value small" id="ayt-toplam-net">0.00</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Toplam Doğru</span>
+                            <span class="result-value small" id="ayt-toplam-dogru">0</span>
+                        </div>
+                        <div class="result-card">
+                            <span class="result-label">Toplam Yanlış</span>
+                            <span class="result-value small" id="ayt-toplam-yanlis">0</span>
+                        </div>
+                    </div>
+                    <div class="ayt-note">
+                        <p>⚠️ AYT puanı hesaplanırken TYT netleri de kullanılır. Daha doğru sonuç için önce TYT bölümünü doldurun.</p>
+                    </div>
+                    <div class="net-breakdown" id="ayt-net-breakdown">
+                        <h4>📋 Ders Bazlı Net Dağılımı</h4>
+                        <div class="breakdown-bars" id="ayt-breakdown-bars"></div>
+                    </div>
+
+                    <!-- Ranking & Percentile Section -->
+                    <div class="ranking-section" id="ayt-ranking-section">
+                        <h4>🏆 Tahmini Sıralama & Yüzdelik Dilim</h4>
+                        <div class="ranking-hero">
+                            <div class="percentile-gauge">
+                                <svg viewBox="0 0 120 120" class="gauge-svg">
+                                    <circle cx="60" cy="60" r="52" class="gauge-track"/>
+                                    <circle cx="60" cy="60" r="52" class="gauge-fill" id="ayt-gauge-fill" stroke-dasharray="0 327" />
+                                </svg>
+                                <div class="gauge-center">
+                                    <span class="gauge-percent" id="ayt-percentile">%0</span>
+                                    <span class="gauge-sub">Yüzdelik</span>
+                                </div>
+                            </div>
+                            <div class="ranking-info">
+                                <div class="ranking-number">
+                                    <span class="rank-label">Tahmini Sıralama</span>
+                                    <span class="rank-value" id="ayt-siralama">—</span>
+                                </div>
+                                <div class="ranking-badge" id="ayt-badge">—</div>
+                                <div class="ranking-detail">
+                                    <span class="detail-label" id="ayt-detail-label">Ortalama Aday Sayısı</span>
+                                    <span class="detail-value" id="ayt-avg-students">—</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="yearly-comparison">
+                            <h5>📅 Son 5 Yıl Karşılaştırması</h5>
+                            <div class="yearly-table-wrap">
+                                <table class="yearly-table" id="ayt-yearly-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Yıl</th>
+                                            <th>Aday Sayısı</th>
+                                            <th>Tahmini Sıralama</th>
+                                            <th>Yüzdelik Dilim</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ayt-yearly-tbody">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>⚠️ Bu hesaplama yaklaşık değerler içerir. Gerçek puanlar ÖSYM/MEB tarafından belirlenir.</p>
+            <p class="footer-credit">© 2026 | Öğrenciler için geliştirilmiştir 💜</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
